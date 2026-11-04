@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">NovaTube</string>
+    <string name="tab_feed">Лента ИИ</string>
+    <string name="tab_downloader">Скачиватель</string>
+    <string name="tab_ai_brain">ИИ-Вкусы</string>
+    <string name="tab_library">Библиотека</string>
+    <string name="ad_block_active">AdGuard &amp; SponsorBlock: Активны (0 рекламы)</string>
+    <string name="search_hint">Поиск видео (Piped / Archive / Техно)...</string>
+    <string name="download_now">Скачать видео</string>
+    <string name="quick_download_menu">Быстрый скачиватель</string>
+    <string name="ai_curate_button">ИИ-Пересборка ленты</string>
+    <string name="ai_summary_button">ИИ-Разбор без воды</string>
+    <string name="url_input_hint">Вставьте ссылку на видео (MP4 / YouTube / Archive.org)</string>
+    <string name="start_download">Скачать в память</string>
+</resources>

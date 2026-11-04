@@ -1,0 +1,6 @@
+{
+  "name": "NovaTube",
+  "description": "Ad-free video client with local AI personalization, SponsorBlock engine, and built-in direct video downloader.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
