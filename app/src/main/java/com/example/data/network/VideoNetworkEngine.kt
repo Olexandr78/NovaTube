@@ -691,23 +691,34 @@ class VideoNetworkEngine {
                 if (bodyStr.isBlank()) return null
                 val root = json.parseToJsonElement(bodyStr).jsonObject
 
-                val allFiles = mutableListOf<JsonObject>()
-                root["files"]?.jsonArray?.forEach { (it as? JsonObject)?.let(allFiles::add) }
-                root["streamingPlaylists"]?.jsonArray?.forEach { sp ->
-                    sp.jsonObject["files"]?.jsonArray?.forEach { (it as? JsonObject)?.let(allFiles::add) }
-                }
+                // PeerTube exposes two different kinds of MP4 URLs:
+                // 1) files[]: complete downloadable MP4 files;
+                // 2) streamingPlaylists[].files[]: fragmented HLS/DASH segments.
+                // A fragmented segment is NOT a standalone MP4. MediaPlayer cannot play it
+                // after saving it under a .mp4 filename, so only use complete files here.
+                val completeFiles = root["files"]?.jsonArray
+                    ?.mapNotNull { it as? JsonObject }
+                    .orEmpty()
 
-                // Filter to genuine video MP4 files (240p..720p, NEVER 0/"Audio only", size <= 25 MB)
-                val candidates = allFiles.mapNotNull { fObj ->
+                val candidates = completeFiles.mapNotNull { fObj ->
                     val fileUrl = fObj["fileUrl"]?.jsonPrimitive?.content.orEmpty()
-                    val resId = fObj["resolution"]?.jsonObject?.get("id")?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+                    val urlPath = fileUrl.substringBefore("?").substringBefore("#")
+                    val resId = fObj["resolution"]?.jsonObject
+                        ?.get("id")?.jsonPrimitive?.content?.toIntOrNull() ?: 0
                     val sizeBytes = fObj["size"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
-                    if (fileUrl.endsWith(".mp4") && resId in 240..720 && sizeBytes in 400_000L..25_000_000L) {
-                        Triple(fileUrl, "${resId}p", ((sizeBytes / (1024.0 * 1024.0)) * 10.0).toInt() / 10.0)
+                    val isCompleteMp4 = urlPath.endsWith(".mp4", ignoreCase = true) &&
+                        !urlPath.contains("streaming-playlists", ignoreCase = true) &&
+                        !urlPath.contains("fragmented", ignoreCase = true)
+                    if (isCompleteMp4 && resId in 240..720 && sizeBytes >= 400_000L) {
+                        Triple(
+                            fileUrl,
+                            "${resId}p",
+                            ((sizeBytes / (1024.0 * 1024.0)) * 10.0).toInt() / 10.0
+                        )
                     } else {
                         null
                     }
-                }.sortedBy { it.third } // Prefer smaller valid video MP4 for fast startup
+                }.sortedBy { it.third } // Prefer smaller complete MP4 for faster startup
 
                 candidates.firstOrNull()
             }
