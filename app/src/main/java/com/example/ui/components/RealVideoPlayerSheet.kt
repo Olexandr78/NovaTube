@@ -180,8 +180,15 @@ fun RealVideoPlayerScreen(
             File(downloadedEntry.localFilePath).length() > 4096L
     }
 
-    var engineMode by remember(video.id) {
-        mutableStateOf(VideoEngineMode.NATIVE_MP4_TEXTURE)
+    var engineMode by remember(video.id, video.youtubeId) {
+        // YouTube IDs must use the existing YouTube WebView player, not the native MP4 loader.
+        mutableStateOf(
+            if (video.youtubeId.isNotBlank()) {
+                VideoEngineMode.YOUTUBE_MOBILE_WEB
+            } else {
+                VideoEngineMode.NATIVE_MP4_TEXTURE
+            }
+        )
     }
 
     // Guaranteed local MP4 file on disk so MediaPlayer plays via FileDescriptor with 0 network stalls!
