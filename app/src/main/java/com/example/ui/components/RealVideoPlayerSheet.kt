@@ -136,6 +136,23 @@ private val streamHttpClient = OkHttpClient.Builder()
     .followSslRedirects(true)
     .build()
 
+/** Checks the ISO-BMFF file signature; an HLS fragment or HTML error page is not an MP4. */
+private fun isValidMp4File(file: File): Boolean {
+    if (!file.isFile || file.length() < 16L) return false
+    return try {
+        FileInputStream(file).use { input ->
+            val header = ByteArray(12)
+            if (input.read(header) != header.size) return false
+            header[4] == 'f'.code.toByte() &&
+                header[5] == 't'.code.toByte() &&
+                header[6] == 'y'.code.toByte() &&
+                header[7] == 'p'.code.toByte()
+        }
+    } catch (_: Exception) {
+        false
+    }
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -184,117 +201,113 @@ fun RealVideoPlayerScreen(
     var sponsorSkippedBanner by remember { mutableStateOf<String?>(null) }
     var videoResolutionLabel by remember { mutableStateOf("HD MP4") }
 
-    // Step 1: Fetch the REAL HTTP MP4 video stream into local disk cache so MediaPlayer plays
-    // the genuine video via FileDescriptor with zero Stagefright HTTP bugs and zero test flowers!
+    // Step 1: Download only the actual stream URL, then verify that it is a complete MP4.
+    // HLS playlist fragments must never be renamed to .mp4 and sent to MediaPlayer.
     LaunchedEffect(video.id, video.streamUrl, localFileAvailable, downloadedEntry?.localFilePath) {
+        playableLocalFile = null
+        isUsingSynthesizedStream = false
+        isBuffering = true
+        bufferProgressPct = 0
+
         if (localFileAvailable && downloadedEntry != null) {
-            isUsingSynthesizedStream = false
-            playableLocalFile = File(downloadedEntry.localFilePath)
+            val downloadedFile = File(downloadedEntry.localFilePath)
+            if (isValidMp4File(downloadedFile)) {
+                playableLocalFile = downloadedFile
+                bufferProgressPct = 100
+                isBuffering = false
+            } else {
+                isBuffering = false
+            }
             return@LaunchedEffect
         }
 
         withContext(Dispatchers.IO) {
-            // Purge legacy cache folder that could contain old flower.mp4 files
-            try {
-                val legacyFolder = File(context.cacheDir, "novatube_streams")
-                if (legacyFolder.exists()) {
-                    legacyFolder.deleteRecursively()
-                }
-            } catch (_: Exception) {
-            }
-
-            val cacheFolder = File(context.cacheDir, "novatube_real_v3_streams")
+            val cacheFolder = File(context.cacheDir, "novatube_real_v4_streams")
             if (!cacheFolder.exists()) cacheFolder.mkdirs()
 
             val safeId = video.id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
             val netCacheFile = File(cacheFolder, "${safeId}_real.mp4")
-            if (netCacheFile.exists() && netCacheFile.length() > 65_536L) {
-                isUsingSynthesizedStream = false
-                bufferProgressPct = 100
+            if (isValidMp4File(netCacheFile)) {
                 playableLocalFile = netCacheFile
+                bufferProgressPct = 100
+                isBuffering = false
+                return@withContext
+            } else if (netCacheFile.exists()) {
+                netCacheFile.delete()
+            }
+
+            val url = video.streamUrl.trim()
+            val normalizedPath = url.substringBefore("?").substringBefore("#").lowercase()
+            val isUnsupportedSegment = normalizedPath.contains("streaming-playlists") ||
+                normalizedPath.contains("fragmented") ||
+                normalizedPath.endsWith(".m3u8") ||
+                normalizedPath.endsWith(".mpd")
+
+            if (!url.startsWith("https://") && !url.startsWith("http://") || isUnsupportedSegment) {
+                isBuffering = false
                 return@withContext
             }
 
-            isBuffering = true
-            bufferProgressPct = 5
+            val tempNet = File(cacheFolder, "${safeId}_real.tmp")
+            try {
+                tempNet.delete()
+                val req = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) Chrome/124.0.0.0 Mobile")
+                    .build()
 
-            val categoryFallback = when {
-                video.category.contains("Авто", ignoreCase = true) ->
-                    "https://tube.blueben.net/static/streaming-playlists/hls/42c8b25f-93ec-48cc-87a4-25e7da1ee0d0/509c4aba-b5db-4218-9fd1-42e1e9d116c2-360-fragmented.mp4"
-                video.category.contains("Железо", ignoreCase = true) || video.category.contains("Код", ignoreCase = true) ->
-                    "https://media.makertube.net/streaming-playlists/hls/aa8863b9-b2e1-4acd-ac9e-e917e1ff5fb1/3886309f-71fa-4e5a-8c0e-73b8232f5f4f-720-fragmented.mp4"
-                video.category.contains("Ретро", ignoreCase = true) ->
-                    "https://peertube.wtf/static/streaming-playlists/hls/64908a7c-0106-4888-8882-2d871a97a735/650d0686-ba57-4244-b19a-4d2ea533a0ac-360-fragmented.mp4"
-                video.category.contains("Гонки", ignoreCase = true) || video.category.contains("Игры", ignoreCase = true) ->
-                    "https://vids.stary.pc.pl/static/streaming-playlists/hls/bef1abbf-36e3-44dc-8602-4e27b16130e6/bef1abbf-36e3-44dc-8602-4e27b16130e6-240-fragmented.mp4"
-                else ->
-                    "https://peertube.wtf/static/streaming-playlists/hls/d33096a5-8f2c-4fb0-97be-e04541374ff6/1428b65f-b22b-41e2-80a5-d19d98fafc0a-720-fragmented.mp4"
-            }
+                streamHttpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+                    val body = resp.body ?: throw IllegalStateException("Empty response")
+                    val contentType = body.contentType()?.toString()?.lowercase().orEmpty()
+                    if (contentType.contains("mpegurl") || contentType.contains("dash+xml") ||
+                        contentType.contains("text/html")
+                    ) {
+                        throw IllegalStateException("The URL is not a direct MP4 file")
+                    }
 
-            val candidateUrls = listOf(video.streamUrl, categoryFallback)
-                .filter {
-                    it.startsWith("http") &&
-                        !it.contains("flower.mp4") &&
-                        !it.contains("googleapis.com")
-                }
-                .distinct()
-
-            var realVideoLoaded = false
-            for (url in candidateUrls) {
-                try {
-                    val req = Request.Builder()
-                        .url(url)
-                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) Chrome/124.0.0.0 Mobile")
-                        .build()
-                    val tempNet = File(cacheFolder, "${safeId}_real.tmp")
-                    var downloadedOk = false
-                    streamHttpClient.newCall(req).execute().use { resp ->
-                        if (resp.isSuccessful) {
-                            val body = resp.body
-                            if (body != null) {
-                                val expectedLen = body.contentLength().let { if (it > 0) it else 4_500_000L }
-                                body.byteStream().use { input ->
-                                    FileOutputStream(tempNet).use { out ->
-                                        val buf = ByteArray(32 * 1024)
-                                        var r: Int
-                                        var total = 0L
-                                        while (input.read(buf).also { r = it } != -1) {
-                                            out.write(buf, 0, r)
-                                            total += r
-                                            val pct = ((total * 100L) / expectedLen).toInt().coerceIn(8, 99)
-                                            bufferProgressPct = pct
-                                        }
-                                        if (total > 65_536L) downloadedOk = true
-                                    }
+                    val expectedLen = body.contentLength()
+                    body.byteStream().use { input ->
+                        FileOutputStream(tempNet).use { output ->
+                            val buffer = ByteArray(32 * 1024)
+                            var total = 0L
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                output.write(buffer, 0, count)
+                                total += count
+                                if (expectedLen > 0L) {
+                                    bufferProgressPct = ((total * 100L) / expectedLen)
+                                        .toInt().coerceIn(1, 99)
                                 }
                             }
+                            output.fd.sync()
                         }
                     }
-                    if (downloadedOk && tempNet.exists()) {
-                        if (netCacheFile.exists()) netCacheFile.delete()
-                        tempNet.renameTo(netCacheFile)
-                        isUsingSynthesizedStream = false
-                        bufferProgressPct = 100
-                        playableLocalFile = netCacheFile
-                        realVideoLoaded = true
-                        break
-                    }
-                } catch (_: Exception) {
-                }
-            }
 
-            // Only if the device has no internet connection at all, generate offline hardware fallback
-            if (!realVideoLoaded) {
-                val hwStreamFile = File(cacheFolder, "${safeId}_hw.mp4")
-                val hwOk = LocalHardwareMp4Generator.ensurePlayableMp4File(
-                    outputFile = hwStreamFile,
-                    video = video,
-                    durationSeconds = 8
-                )
-                if (hwOk && hwStreamFile.exists()) {
-                    isUsingSynthesizedStream = true
-                    playableLocalFile = hwStreamFile
+                    if (expectedLen > 0L && tempNet.length() != expectedLen) {
+                        throw IllegalStateException("Incomplete MP4 response")
+                    }
+                    if (!isValidMp4File(tempNet)) {
+                        throw IllegalStateException("Response is not a complete MP4 file")
+                    }
                 }
+
+                if (netCacheFile.exists()) netCacheFile.delete()
+                if (!tempNet.renameTo(netCacheFile)) {
+                    tempNet.copyTo(netCacheFile, overwrite = true)
+                    tempNet.delete()
+                }
+                if (!isValidMp4File(netCacheFile)) {
+                    netCacheFile.delete()
+                    throw IllegalStateException("Cached MP4 validation failed")
+                }
+                playableLocalFile = netCacheFile
+                bufferProgressPct = 100
+            } catch (_: Exception) {
+                tempNet.delete()
+            } finally {
+                isBuffering = false
             }
         }
     }
